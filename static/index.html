@@ -1,0 +1,47 @@
+﻿<!-- index.html -->
+<!doctype html>
+
+<html ng-app="galton">
+<head>
+    <!-- META -->
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Optimize mobile viewport -->
+
+    <title>Galton - estimate with confidence</title>
+
+    <!-- SCROLLS -->
+    <link rel="stylesheet" href="/static/muffin.css">
+
+    <!-- SPELLS -->
+    <script type="text/javascript" src="http://ajax.googleapis.com/ajax/libs/angularjs/1.1.5/angular.min.js"></script>
+    <script type="text/javascript" src="/static/core.js"></script>
+    <script type="text/javascript" src="/static/rpx.js"></script>
+    <script type="text/javascript" src="/static/sprintf.js"></script>
+    <script type="text/javascript" src="/static/jscharts.js"></script>
+</head>
+<body ng-controller="mainController">
+    <div style="position:absolute;right:0px;top:0px">
+        <a href="https://github.com/macterra/galton"><img src="/static/fork-me-on-github.png" border="0" /></a>
+    </div>
+    
+    <div ng-show="!session.loggedin">
+        <a class="rpxnow" onclick="return false;" ng-href="{{ session.rpx_url }}"><button>Log In</button></a> using Google, Facebook, Twitter, etc.
+    </div>
+    <div ng-show="session.loggedin">
+        Welcome, {{ session.name }} <a href="/logout"><button>Log Out</button></a>
+    </div>
+    <a href="/"><img src="/static/galton.jpg" align="left" border="0" /></a>
+
+
+    <h1>Galton/Angular : estimate with confidence</h1>
+
+    <br clear=all />
+    
+    <!-- MAIN CONTENT AND INJECTED VIEWS -->
+    <div id="main">       
+        <!-- angular templating -->
+        <!-- this is where content will be injected -->
+        <div ng-view></div>
+    </div>
+</body>
+</html>

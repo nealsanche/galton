@@ -8,19 +8,33 @@ from web import form
 import json
 from montecarlo import *
 from datetime import *
-import urllib
-import urllib2
+from time import mktime, strftime
+import urllib, urllib2
 
 import numpy
     
 urls = (
-  '/', 'projectlist',
+  
+  # v2 API
+  '/', 'angular',
+  '/api/projects', 'GetProjects',
+  '/api/project/(\d*)', 'GetProject',
+  '/api/project/save', 'SaveProject',
+  '/api/project/create', 'CreateProject',
+  '/api/project/copy/(\d*)', 'CopyProject',
+  '/api/project/delete/(\d*)', 'DeleteProject',
+  '/api/tasks/(\d*)', 'GetTasks',
+  '/api/results/(\d*)', 'RunSimulation',
+  '/api/simulate/project', 'SimulateProject',
+  '/api/simulate/task', 'SimulateTask',
+
+  # v1 API
+  '/old', 'projectlist',
   '/login', 'login',
   '/logout', 'logout',
   '/users', 'users',
   '/favicon.ico', 'favicon',
   '/montecarlo', 'montecarlo',
-  '/projects', 'projects',
   '/projectlist', 'projectlist',
   '/project/(\d*)', 'project',
   '/project/(\d*)/tasks', 'tasks',
@@ -43,23 +57,274 @@ if web.config.get('_session') is None:
 else:
     session = web.config._session
     
+class angular:
+    def GET(self):
+        web.header('Content-Type', 'text/html')
+        f = open('static/index.html', 'r')
+        return f.read()
+
 class favicon:
     def GET(self):        
         raise web.seeother('/static/favicon.ico')
 
+class MyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return strftime("%Y-%m-%d %H:%M", obj.timetuple())
+        if isinstance(obj, date):
+            return strftime("%Y-%m-%d", obj.timetuple())
+        return json.JSONEncoder.default(self, obj)
+
 def DumpTable(table):
-    return json.dumps([t for t in db.select(table)])
+    return json.dumps([t for t in db.select(table)], cls=MyEncoder)
     
 def DumpQuery(q):
-    return json.dumps([t for t in db.query(q)])
+    return json.dumps([t for t in db.query(q)], cls=MyEncoder)
         
 class users:
     def GET(self):
         return DumpTable('users')
         
-class projects:
+class GetProjects:
     def GET(self):
-        return DumpTable('projects')       
+        user = CurrentUser()
+        q = """
+            select p.*, u.name as owner,            
+            case when p.userid=%d then 1 else 0 end as mine
+            from projects p left outer join users u on p.userid=u.id
+            where (p.publish=1 or p.userid=%d or p.userid=0)
+            order by updated desc
+            """ % (user, user)
+        return DumpQuery(q)
+
+class GetProject:
+    def GET(self, id):
+        user = CurrentUser()
+        id = int(id)
+        q = """
+            select p.*, u.name as owner,            
+            case when p.userid=%d then 1 else 0 end as mine     
+            from projects p left outer join users u on p.userid=u.id
+            where (p.publish=1 or p.userid=%d) and p.id=%d
+            """ % (user, user, id)
+        return DumpQuery(q)
+
+class GetTasks:
+    def GET(self, id):
+        user = CurrentUser()
+        id = int(id)
+        q = """
+            select * from tasks where project=%d           
+            """ % (id)
+        return DumpQuery(q)
+    
+class RunSimulation:
+    def GET(self, id):
+        project = Project()
+        project.read(id)
+        results = project.run()
+        return json.dumps(results)
+        #return json.dumps(GetResults(id, 0))
+    
+class SimulateProject:
+    def POST(self):
+        web.input() # init web.ctx.data  
+        
+class SimulateProject:
+    def POST(self):
+        web.input() # init web.ctx.data  
+        
+        try:
+            data = json.loads(web.ctx.data)        
+            project = Project()
+            project.init(data)
+            results = project.run()
+            return json.dumps(results)
+        except:
+            return 0
+
+class SimulateTask:
+    def POST(self):
+        web.input() # init web.ctx.data  
+        
+        try:
+            data = json.loads(web.ctx.data)        
+            project = Project()
+            project.init(data, True)
+            results = project.run()
+            return json.dumps(results)
+        except:
+            return 0
+
+class CreateProject:
+    def POST(self):
+        web.input() # init web.ctx.data      
+
+        try:
+            data = json.loads(web.ctx.data)  
+            description = data['description'].strip()
+        except:
+            return 0
+
+        if len(description) == 0:
+            return 0
+
+        now = web.SQLLiteral("DATETIME('now','localtime')")
+
+        newId = db.insert('projects', 
+                            description=description, 
+                            estimate='p50', 
+                            units='days', 
+                            userid=CurrentUser(), 
+                            publish=False, 
+                            schedule=False,
+                            created=now, 
+                            updated=now,
+                            trials=10000,
+                            capacity=1)
+        db.insert('tasks', 
+                  project=newId, 
+                  include=True, 
+                  count=1, 
+                  estimate=1.0, 
+                  risk='medium', 
+                  description='task 1')
+
+        return newId
+    
+    
+class CopyProject:
+    def GET(self, id):
+        try:
+            id = int(id)
+            userid = CurrentUser()
+            
+            q = "select * from projects where id=%d" % (id)
+            for r in db.query(q):
+                description = r.description
+
+            # only allowed to copy published projects and your own projects
+            if r.userid != userid and not r.publish:
+                return 0
+
+            description = "(copy of) " + description
+            
+            now = web.SQLLiteral("DATETIME('now','localtime')")
+            newId = db.insert('projects', 
+                              description=description, 
+                              estimate=r.estimate, 
+                              units=r.units, 
+                              userid=userid, 
+                              publish=False, 
+                              created=now, 
+                              updated=now,
+                              trials=r.trials,
+                              schedule=r.schedule,
+                              start=r.start,
+                              capacity=r.capacity)
+        
+            q = "select * from tasks where project=%d" % (id)
+            with db.transaction():
+                for r in db.query(q):
+                    db.insert('tasks', 
+                              project=newId, 
+                              description=r.description,
+                              estimate=r.estimate, 
+                              risk=r.risk, 
+                              count=r.count, 
+                              include=r.include)
+
+            return newId
+
+        except:
+            return 0
+    
+class DeleteProject:
+    def GET(self, id):
+        try:
+            CheckOwner(id)
+
+            id = int(id)
+               
+            db.query("delete from tasks where project=%d" % (id))
+            db.query("delete from projects where id=%d" % (id))
+
+            return id
+
+        except:
+            return 0
+
+class SaveProject:
+    def POST(self):
+        web.input() # init web.ctx.data
+        data = json.loads(web.ctx.data)
+        p = data['project']
+        tasks = data['tasks']
+
+        print web.ctx.data
+        print p, type(p)    
+        print tasks, type(tasks)        
+
+        id = p['id']
+        description = p['description']
+        estimate = p['estimate']
+        units = p['units']
+        schedule = 1 if p['schedule'] else 0
+        try:
+            trials = int(p['trials'])
+
+            if trials < 1:
+                trials = 100
+            if trials > 100000:
+                trials = 100000
+        except:
+            trials = 10000
+
+        try:
+            capacity = float(p['capacity'])
+        except:
+            capacity = 1.0
+
+        publish = 1 if p['publish'] else 0
+        now = web.SQLLiteral("DATETIME('now','localtime')")
+
+        db.update('projects', where="id=%d" % (id), 
+                  description=description, 
+                  estimate=estimate, 
+                  units=units, 
+                  publish=publish, 
+                  schedule=schedule, 
+                  trials=trials, 
+                  capacity=capacity, 
+                  updated=now)
+        
+        q = "delete from tasks where project=%s" % (id)
+        db.query(q)
+
+        for t in tasks:
+            description = t['description']
+            risk = t['risk']
+            include = 1 if t['include'] else 0
+
+            try:
+                count = int(t['count'])
+
+                if count < 1:
+                    count = 1
+            except:
+                count = 1
+
+            try:
+                estimate = float(t['estimate'])
+
+                if estimate < 0:
+                    estimate = 0
+            except:
+                estimate = 0
+
+            db.insert('tasks', project=id, description=description, count=count, estimate=estimate, risk=risk, include=include)
+
+        return "yesh"
 
 def CurrentUser():
     try:
@@ -114,7 +379,18 @@ def SessionLogout():
     
 class login:
     def GET(self):
-        return session        
+        info = {}
+
+        for prop in ['email', 'name', 'loggedin', 'userid']:
+            try:
+                info[prop] = session[prop]
+            except:
+                pass
+            
+        token_url = "%s/login" % (web.ctx.home)
+        info['rpx_url'] = "https://galton.rpxnow.com/openid/v2/signin?token_url=%s" % (web.net.urlquote(token_url))
+
+        return json.dumps(info)
         
     def POST(self):
         i = web.input()
@@ -193,7 +469,8 @@ class ProjectList:
         
         timestampFormat = "%Y-%m-%d %H:%M"
         
-        q = "select p.*, u.name from projects p left outer join users u on p.userid=u.id order by updated desc"        
+        q = "select p.*, u.name from projects p left outer join users u on p.userid=u.id order by updated desc"  
+        
         for r in db.query(q):
         
             if CurrentUser() != r.userid and not r.publish:
@@ -466,12 +743,83 @@ class montecarlo:
         results = RunMonteCarlo(trials,tasks)    
         return json.dumps(results)       
         
+class Project:
+    def __init__(self):
+        self.trials = 1000
+        self.type = 'p50'
+        self.tasks = []
+        self.schedule = False
+        self.capacity = 1
+
+    def read(self, id):
+        q = "select * from projects where id=%s" % (id)
+        for r in db.query(q):
+            self.type = r.estimate
+            self.trials = r.trials
+            self.schedule = r.schedule
+            self.start = r.start
+            self.capacity = r.capacity
+                   
+        self.tasks = []
+        q = "select * from tasks where project=%s" % (id)
+        for r in db.query(q):
+            if r.include:
+                for i in range(int(r.count)):
+                    task = Task(float(r.estimate), self.type, r.risk)
+                    self.tasks.append(task)
+
+    def init(self, data, include=False):
+        p = data['project']
+        self.trials = int(p['trials'])
+        self.type = p['estimate']
+        self.schedule = p['schedule']
         
+        self.tasks = []
+        for t in data['tasks']:
+            if t['include'] or include:
+                for i in range(int(t['count'])):
+                    task = Task(float(t['estimate']), self.type, t['risk'])
+                    self.tasks.append(task)
+
+    def run(self):
+        results = RunMonteCarlo(self.trials, self.tasks)
+
+        if self.schedule:
+            effort, prob = zip(*results["cumprob"])
+                
+            start = date.today() #self.start
+            cumprob = 0
+            cumeffort = 0
+            week = 0
+            schedule = []
+        
+            while cumprob < 100:            
+                cumprob = numpy.interp(cumeffort, effort, prob, 0, 100)
+                #print week, cumeffort, cumprob           
+                schedule.append([str(start), cumprob])                          
+                
+                cumeffort += self.capacity
+                start += timedelta(7)
+                week += 1
+       
+            #print schedule
+            results["schedule"] = schedule
+
+        return results
+
+
 def GetResults(id, trials):
     q = "select * from projects where id=%s" % (id)
     for r in db.query(q):
         type = r.estimate
-                
+
+    if trials == 0:
+        trials = r.trials
+
+    schedule = r.schedule
+    start = r.start
+    capacity = r.capacity
+                    
     tasks = []
     q = "select * from tasks where project=%s" % (id)
     for r in db.query(q):
@@ -480,7 +828,29 @@ def GetResults(id, trials):
                 task = Task(float(r.estimate), type, r.risk)
                 tasks.append(task)   
                 
-    return RunMonteCarlo(trials,tasks)    
+    results = RunMonteCarlo(trials,tasks)
+
+    if schedule:      
+        effort, prob = zip(*results["cumprob"])
+                
+        cumprob = 0
+        cumeffort = 0
+        week = 0
+        schedule = []
+        
+        while cumprob < 100:            
+            cumprob = numpy.interp(cumeffort, effort, prob, 0, 100)
+            #print week, cumeffort, cumprob           
+            schedule.append([str(start), cumprob])                          
+                
+            cumeffort += capacity
+            start += timedelta(7)
+            week += 1
+       
+        #print schedule
+        results["schedule"] = schedule
+        
+    return results
     
 class results:
     def GET(self, id):
@@ -506,7 +876,7 @@ class resultscsv:
         
         pairs = ["%s,%s\n" % (pair[1], pair[0]) for pair in results["cumprob"]]
         return 'prob,effort\n' + ''.join(pairs)
-        
+    
 
 class schedule:
     def GET(self, id):
@@ -551,7 +921,7 @@ class schedule:
             week += 1
        
         #print schedule
-        results["schedule"] = schedule
+        results["schedule"] = schedule          
         return json.dumps(results)
         
 if __name__ == "__main__": 
